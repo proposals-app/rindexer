@@ -74,6 +74,8 @@ pub async fn handle_add_contract_command(
 
     let client = Client::builder()
         .with_api_key(etherscan_api_key)
+        .with_api_url("https://api.etherscan.io/v2/api")
+        .unwrap()
         .chain(chain_network)
         .map_err(|e| {
             print_error_message(&format!("Invalid chain id {}", e));
