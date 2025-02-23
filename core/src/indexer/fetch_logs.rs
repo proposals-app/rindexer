@@ -648,15 +648,36 @@ fn handle_get_logs_error(
         }
     } else {
         warn!(
-            "{} - {} - Error encountered, retrying same block range. Error: {}",
+            "{} - {} - Error encountered, retrying with adjusted block range. Error: {}",
             info_log_name,
             IndexingEventProgressStatus::Syncing.log(),
             err
         );
-        return Some(ProcessHistoricLogsStreamResult {
-            next: current_filter.clone(), // Retry with the same filter
-            max_block_range_limitation,
-        });
+
+        // Retry with half the max_block_range_limitation, if available.
+        if let Some(max_range) = max_block_range_limitation {
+            let new_range = max_range / 2;
+            let new_to_block = std::cmp::min(from_block + new_range, to_block); // Ensure we don't exceed original to_block
+
+            // if the new range is 0 then use the same filter
+            if new_range == U64::from(0) {
+                return Some(ProcessHistoricLogsStreamResult {
+                    next: current_filter.clone(), // Retry with the same filter
+                    max_block_range_limitation,
+                });
+            }
+
+            return Some(ProcessHistoricLogsStreamResult {
+                next: current_filter.set_to_block(new_to_block),
+                max_block_range_limitation: Some(new_range),
+            });
+        } else {
+            // if no max range is set, then retry with the same filter again
+            return Some(ProcessHistoricLogsStreamResult {
+                next: current_filter.clone(), // Retry with the same filter
+                max_block_range_limitation,
+            });
+        }
     }
 
     error!(
