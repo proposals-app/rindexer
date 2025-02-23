@@ -40,9 +40,11 @@ pub fn fetch_logs_stream(
         let from_block = initial_filter.get_from_block();
         let mut current_filter = initial_filter;
 
-        // add any max block range limitation before we start processing
         let mut max_block_range_limitation =
             config.network_contract.cached_provider.max_block_range;
+
+        let mut min_block_range_limitation =
+            config.network_contract.cached_provider.min_block_range;
         if max_block_range_limitation.is_some() {
             current_filter = current_filter.set_to_block(calculate_process_historic_log_to_block(
                 &from_block,
@@ -87,7 +89,7 @@ pub fn fetch_logs_stream(
 
                     if let Some(result) = result {
                         current_filter = result.next;
-                        max_block_range_limitation = result.max_block_range_limitation;
+                        result.block_range;
                     } else {
                         break;
                     }
@@ -132,7 +134,7 @@ pub fn fetch_logs_stream(
 
 struct ProcessHistoricLogsStreamResult {
     pub next: RindexerEventFilter,
-    pub max_block_range_limitation: Option<U64>,
+    pub block_range: Option<U64>,
 }
 
 async fn fetch_historic_logs_stream(
@@ -167,7 +169,7 @@ async fn fetch_historic_logs_stream(
         );
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.set_from_block(to_block),
-            max_block_range_limitation,
+            block_range: max_block_range_limitation,
         });
     }
 
@@ -244,7 +246,7 @@ async fn fetch_historic_logs_stream(
                         next: current_filter
                             .set_from_block(next_from_block)
                             .set_to_block(new_to_block),
-                        max_block_range_limitation,
+                        block_range: max_block_range_limitation,
                     })
                 };
             }
@@ -283,7 +285,7 @@ async fn fetch_historic_logs_stream(
                         next: current_filter
                             .set_from_block(next_from_block)
                             .set_to_block(new_to_block),
-                        max_block_range_limitation,
+                        block_range: max_block_range_limitation,
                     })
                 };
             }
@@ -664,7 +666,7 @@ fn handle_get_logs_error(
                 next: current_filter
                     .set_from_block(retry_result.from)
                     .set_to_block(retry_result.to),
-                max_block_range_limitation,
+                block_range: max_block_range_limitation,
             });
         }
     }
@@ -689,19 +691,19 @@ fn handle_get_logs_error(
         if new_range == U64::from(0) {
             return Some(ProcessHistoricLogsStreamResult {
                 next: current_filter.clone(), // Retry with the same filter
-                max_block_range_limitation: new_max_block_range_limitation,
+                block_range: new_max_block_range_limitation,
             });
         }
 
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.set_to_block(new_to_block),
-            max_block_range_limitation: new_max_block_range_limitation,
+            block_range: new_max_block_range_limitation,
         });
     } else {
         // if no max range is set, then retry with the same filter again
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.clone(), // Retry with the same filter
-            max_block_range_limitation,
+            block_range: max_block_range_limitation,
         });
     }
 
