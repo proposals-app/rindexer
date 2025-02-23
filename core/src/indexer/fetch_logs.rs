@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, str::FromStr, sync::Arc, time::Duration};
+use std::{error::Error, str::FromStr, sync::Arc, time::Duration};
 
 use ethers::{
     addressbook::Address,
@@ -77,7 +77,7 @@ pub fn fetch_logs_stream(
 
                     // slow indexing warn user
                     if let Some(range) = max_block_range_limitation {
-                        warn!(
+                        debug!(
                             "{} - RPC PROVIDER IS SLOW - Slow indexing mode enabled, max block range limitation: {} blocks - we advise using a faster provider who can predict the next block ranges.",
                             &config.info_log_name,
                             range
