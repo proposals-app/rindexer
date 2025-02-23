@@ -139,7 +139,7 @@ async fn fetch_historic_logs_stream(
     tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
     topic_id: &H256,
     current_filter: RindexerEventFilter,
-    max_block_range_limitation: Option<U64>,
+    mut max_block_range_limitation: Option<U64>,
     snapshot_to_block: U64,
     info_log_name: &str,
 ) -> Option<ProcessHistoricLogsStreamResult> {
@@ -253,28 +253,52 @@ async fn fetch_historic_logs_stream(
                     IndexingEventProgressStatus::Syncing.log(),
                     next_from_block
                 );
-                return if next_from_block > snapshot_to_block {
-                    None
+
+                let mut new_max_block_range_limitation = max_block_range_limitation;
+                let next_to_block;
+
+                // Increase block range by 50% for the next iteration if no
+                // max_block_range_limitation is set, or respect the limitation if it is set.
+                if max_block_range_limitation.is_none() {
+                    let current_range = to_block - from_block;
+                    let increase_amount = current_range / 2; // 50% increase
+                    let potential_new_to_block = to_block + increase_amount;
+
+                    next_to_block = if potential_new_to_block > snapshot_to_block {
+                        snapshot_to_block
+                    } else {
+                        potential_new_to_block
+                    };
+
+                    // Update max_block_range_limitation to reflect the increased range for
+                    // potential retry logic
+                    new_max_block_range_limitation =
+                        Some(next_to_block - next_from_block + U64::from(1)); // Approximate new
+                                                                              // range
                 } else {
-                    let new_to_block = calculate_process_historic_log_to_block(
+                    next_to_block = calculate_process_historic_log_to_block(
                         &next_from_block,
                         &snapshot_to_block,
                         &max_block_range_limitation,
                     );
+                }
 
+                return if next_from_block > snapshot_to_block {
+                    None
+                } else {
                     debug!(
                         "{} - {} - new_from_block {:?} new_to_block {:?}",
                         info_log_name,
                         IndexingEventProgressStatus::Syncing.log(),
                         next_from_block,
-                        new_to_block
+                        next_to_block
                     );
 
                     Some(ProcessHistoricLogsStreamResult {
                         next: current_filter
                             .set_from_block(next_from_block)
-                            .set_to_block(new_to_block),
-                        max_block_range_limitation,
+                            .set_to_block(next_to_block),
+                        max_block_range_limitation: new_max_block_range_limitation,
                     })
                 };
             }
