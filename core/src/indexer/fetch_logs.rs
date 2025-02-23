@@ -213,6 +213,8 @@ async fn fetch_historic_logs_stream(
                 return None;
             }
 
+            max_block_range_limitation = increase_max_block_range(max_block_range_limitation);
+
             if logs_empty {
                 info!(
                     log_name = %info_log_name,
@@ -638,7 +640,7 @@ fn handle_get_logs_error(
     err: ethers::providers::ProviderError,
     tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
     current_filter: RindexerEventFilter,
-    max_block_range_limitation: Option<U64>,
+    mut max_block_range_limitation: Option<U64>,
     info_log_name: &str,
 ) -> Option<ProcessHistoricLogsStreamResult> {
     let from_block = current_filter.get_from_block();
@@ -655,11 +657,14 @@ fn handle_get_logs_error(
                 retry_max_block_range = ?retry_result.max_block_range,
                 "Retrying with block range"
             );
+
+            max_block_range_limitation = decrease_max_block_range(max_block_range_limitation);
+
             return Some(ProcessHistoricLogsStreamResult {
                 next: current_filter
                     .set_from_block(retry_result.from)
                     .set_to_block(retry_result.to),
-                max_block_range_limitation: retry_result.max_block_range,
+                max_block_range_limitation,
             });
         }
     }
@@ -675,20 +680,22 @@ fn handle_get_logs_error(
 
     // Retry with half the max_block_range_limitation, if available.
     if let Some(max_range) = max_block_range_limitation {
-        let new_range = max_range / 2;
+        let new_range = max_range / U64::from(2);
+        let new_max_block_range_limitation = decrease_max_block_range(Some(new_range));
+
         let new_to_block = std::cmp::min(from_block + new_range, to_block); // Ensure we don't exceed original to_block
 
         // if the new range is 0 then use the same filter
         if new_range == U64::from(0) {
             return Some(ProcessHistoricLogsStreamResult {
                 next: current_filter.clone(), // Retry with the same filter
-                max_block_range_limitation,
+                max_block_range_limitation: new_max_block_range_limitation,
             });
         }
 
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.set_to_block(new_to_block),
-            max_block_range_limitation: Some(new_range),
+            max_block_range_limitation: new_max_block_range_limitation,
         });
     } else {
         // if no max range is set, then retry with the same filter again
@@ -708,4 +715,20 @@ fn handle_get_logs_error(
     );
     let _ = tx.send(Err(Box::new(err)));
     None
+}
+
+fn increase_max_block_range(current_max_block_range: Option<U64>) -> Option<U64> {
+    let current_range = current_max_block_range.unwrap_or(U64::from(100)); // Default starting range if None
+    let increased_range = std::cmp::min(current_range * U64::from(2), U64::from(10000));
+    Some(std::cmp::max(increased_range, U64::from(10))) // Ensure minimum range is 10
+}
+
+fn decrease_max_block_range(current_max_block_range: Option<U64>) -> Option<U64> {
+    match current_max_block_range {
+        Some(current_range) => {
+            let decreased_range = std::cmp::max(current_range / U64::from(2), U64::from(10));
+            Some(decreased_range)
+        }
+        None => None, // If no limit was initially set, we don't introduce one on failure.
+    }
 }
