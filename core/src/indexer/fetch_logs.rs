@@ -646,9 +646,9 @@ fn handle_get_logs_error(
                 max_block_range_limitation: retry_result.max_block_range,
             });
         }
-    } else if is_retryable_error(&err) {
+    } else {
         warn!(
-            "{} - {} - Retryable error encountered, retrying same block range. Error: {}",
+            "{} - {} - Error encountered, retrying same block range. Error: {}",
             info_log_name,
             IndexingEventProgressStatus::Syncing.log(),
             err
@@ -667,16 +667,4 @@ fn handle_get_logs_error(
     );
     let _ = tx.send(Err(Box::new(err)));
     None
-}
-
-fn is_retryable_error(err: &ethers::providers::ProviderError) -> bool {
-    let error_string = err.to_string();
-    error_string.contains("Server Error") || // Matches "502 Server Error", "503 Server Error", etc.
-    error_string.contains("deserialization error") ||
-    error_string.contains(" SerdeError") || // Catch serde errors more generally
-    error_string.contains("connection reset") ||
-    error_string.contains("request timeout") ||
-    error_string.contains("timed out") ||
-    error_string.contains("ECONNREFUSED") ||
-    error_string.contains("HttpError") // covers general http errors
 }
