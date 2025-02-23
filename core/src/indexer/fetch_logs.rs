@@ -633,7 +633,7 @@ fn handle_get_logs_error(
 
     if let Some(json_rpc_error) = err.as_error_response() {
         if let Some(retry_result) = retry_with_block_range(json_rpc_error, from_block, to_block) {
-            debug!(
+            warn!(
                 "{} - {} - Retrying with block range: {:?}",
                 info_log_name,
                 IndexingEventProgressStatus::Syncing.log(),
