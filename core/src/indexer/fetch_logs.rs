@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc, time::Duration};
+use std::{error::Error, fmt, str::FromStr, sync::Arc, time::Duration};
 
 use ethers::{
     addressbook::Address,
@@ -280,34 +280,13 @@ async fn fetch_historic_logs_stream(
             }
         }
         Err(err) => {
-            if let Some(json_rpc_error) = err.as_error_response() {
-                if let Some(retry_result) =
-                    retry_with_block_range(json_rpc_error, from_block, to_block)
-                {
-                    debug!(
-                        "{} - {} - Retrying with block range: {:?}",
-                        info_log_name,
-                        IndexingEventProgressStatus::Syncing.log(),
-                        retry_result
-                    );
-                    return Some(ProcessHistoricLogsStreamResult {
-                        next: current_filter
-                            .set_from_block(retry_result.from)
-                            .set_to_block(retry_result.to),
-                        max_block_range_limitation: retry_result.max_block_range,
-                    });
-                }
-            }
-
-            error!(
-                "{} - {} - Error fetching logs: {}",
+            return handle_get_logs_error(
+                err,
+                tx,
+                current_filter,
+                max_block_range_limitation,
                 info_log_name,
-                IndexingEventProgressStatus::Syncing.log(),
-                err
             );
-
-            let _ = tx.send(Err(Box::new(err)));
-            return None;
         }
     }
 
@@ -640,4 +619,64 @@ fn calculate_process_historic_log_to_block(
     } else {
         *snapshot_to_block
     }
+}
+
+fn handle_get_logs_error(
+    err: ethers::providers::ProviderError,
+    tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
+    current_filter: RindexerEventFilter,
+    max_block_range_limitation: Option<U64>,
+    info_log_name: &str,
+) -> Option<ProcessHistoricLogsStreamResult> {
+    let from_block = current_filter.get_from_block();
+    let to_block = current_filter.get_to_block();
+
+    if let Some(json_rpc_error) = err.as_error_response() {
+        if let Some(retry_result) = retry_with_block_range(json_rpc_error, from_block, to_block) {
+            debug!(
+                "{} - {} - Retrying with block range: {:?}",
+                info_log_name,
+                IndexingEventProgressStatus::Syncing.log(),
+                retry_result
+            );
+            return Some(ProcessHistoricLogsStreamResult {
+                next: current_filter
+                    .set_from_block(retry_result.from)
+                    .set_to_block(retry_result.to),
+                max_block_range_limitation: retry_result.max_block_range,
+            });
+        }
+    } else if is_retryable_error(&err) {
+        warn!(
+            "{} - {} - Retryable error encountered, retrying same block range. Error: {}",
+            info_log_name,
+            IndexingEventProgressStatus::Syncing.log(),
+            err
+        );
+        return Some(ProcessHistoricLogsStreamResult {
+            next: current_filter.clone(), // Retry with the same filter
+            max_block_range_limitation,
+        });
+    }
+
+    error!(
+        "{} - {} - Error fetching logs: {}",
+        info_log_name,
+        IndexingEventProgressStatus::Syncing.log(),
+        err
+    );
+    let _ = tx.send(Err(Box::new(err)));
+    None
+}
+
+fn is_retryable_error(err: &ethers::providers::ProviderError) -> bool {
+    let error_string = err.to_string();
+    error_string.contains("Server Error") || // Matches "502 Server Error", "503 Server Error", etc.
+    error_string.contains("deserialization error") ||
+    error_string.contains(" SerdeError") || // Catch serde errors more generally
+    error_string.contains("connection reset") ||
+    error_string.contains("request timeout") ||
+    error_string.contains("timed out") ||
+    error_string.contains("ECONNREFUSED") ||
+    error_string.contains("HttpError") // covers general http errors
 }
