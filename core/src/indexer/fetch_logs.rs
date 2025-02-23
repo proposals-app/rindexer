@@ -40,21 +40,21 @@ pub fn fetch_logs_stream(
         let from_block = initial_filter.get_from_block();
         let mut current_filter = initial_filter;
 
-        let mut max_block_range_limitation =
+        let mut current_block_range_limitation =
             config.network_contract.cached_provider.max_block_range;
 
-        let mut min_block_range_limitation =
-            config.network_contract.cached_provider.min_block_range;
-        if max_block_range_limitation.is_some() {
+        let min_block_range_limitation = config.network_contract.cached_provider.min_block_range;
+
+        if current_block_range_limitation.is_some() {
             current_filter = current_filter.set_to_block(calculate_process_historic_log_to_block(
                 &from_block,
                 &snapshot_to_block,
-                &max_block_range_limitation,
+                &current_block_range_limitation,
             ));
             debug!(
                 indexing_status = %IndexingEventProgressStatus::Syncing.log(),
                 log_name = %config.info_log_name,
-                max_block_range_limit = ?max_block_range_limitation,
+                max_block_range_limit = ?current_block_range_limitation,
                 "max block range limitation applied - block range indexing will be slower then RPC providers supplying the optimal ranges - https://rindexer.xyz/docs/references/rpc-node-providers#rpc-node-providers"
             );
         }
@@ -69,7 +69,8 @@ pub fn fetch_logs_stream(
                         &tx,
                         &config.topic_id,
                         current_filter.clone(),
-                        max_block_range_limitation,
+                        current_block_range_limitation,
+                        min_block_range_limitation,
                         snapshot_to_block,
                         &config.info_log_name,
                     )
@@ -78,7 +79,7 @@ pub fn fetch_logs_stream(
                     drop(permit);
 
                     // slow indexing warn user
-                    if let Some(range) = max_block_range_limitation {
+                    if let Some(range) = current_block_range_limitation {
                         debug!(
                             log_name = %config.info_log_name,
                             indexing_status = %IndexingEventProgressStatus::Syncing.log(),
@@ -89,7 +90,7 @@ pub fn fetch_logs_stream(
 
                     if let Some(result) = result {
                         current_filter = result.next;
-                        result.block_range;
+                        current_block_range_limitation = result.block_range;
                     } else {
                         break;
                     }
@@ -137,12 +138,14 @@ struct ProcessHistoricLogsStreamResult {
     pub block_range: Option<U64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_historic_logs_stream(
     cached_provider: &Arc<JsonRpcCachedProvider>,
     tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
     topic_id: &H256,
     current_filter: RindexerEventFilter,
-    mut max_block_range_limitation: Option<U64>,
+    mut current_block_range_limitation: Option<U64>,
+    min_block_range_limitation: Option<U64>,
     snapshot_to_block: U64,
     info_log_name: &str,
 ) -> Option<ProcessHistoricLogsStreamResult> {
@@ -169,7 +172,7 @@ async fn fetch_historic_logs_stream(
         );
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.set_from_block(to_block),
-            block_range: max_block_range_limitation,
+            block_range: current_block_range_limitation,
         });
     }
 
@@ -215,7 +218,10 @@ async fn fetch_historic_logs_stream(
                 return None;
             }
 
-            max_block_range_limitation = increase_max_block_range(max_block_range_limitation);
+            current_block_range_limitation = increase_max_block_range(
+                current_block_range_limitation,
+                min_block_range_limitation,
+            );
 
             if logs_empty {
                 info!(
@@ -231,7 +237,7 @@ async fn fetch_historic_logs_stream(
                     let new_to_block = calculate_process_historic_log_to_block(
                         &next_from_block,
                         &snapshot_to_block,
-                        &max_block_range_limitation,
+                        &current_block_range_limitation,
                     );
 
                     debug!(
@@ -246,7 +252,7 @@ async fn fetch_historic_logs_stream(
                         next: current_filter
                             .set_from_block(next_from_block)
                             .set_to_block(new_to_block),
-                        block_range: max_block_range_limitation,
+                        block_range: current_block_range_limitation,
                     })
                 };
             }
@@ -270,7 +276,7 @@ async fn fetch_historic_logs_stream(
                     let new_to_block = calculate_process_historic_log_to_block(
                         &next_from_block,
                         &snapshot_to_block,
-                        &max_block_range_limitation,
+                        &current_block_range_limitation,
                     );
 
                     debug!(
@@ -285,7 +291,7 @@ async fn fetch_historic_logs_stream(
                         next: current_filter
                             .set_from_block(next_from_block)
                             .set_to_block(new_to_block),
-                        block_range: max_block_range_limitation,
+                        block_range: current_block_range_limitation,
                     })
                 };
             }
@@ -293,9 +299,9 @@ async fn fetch_historic_logs_stream(
         Err(err) => {
             return handle_get_logs_error(
                 err,
-                tx,
                 current_filter,
-                max_block_range_limitation,
+                current_block_range_limitation,
+                min_block_range_limitation,
                 info_log_name,
             );
         }
@@ -624,10 +630,10 @@ fn retry_with_block_range(
 fn calculate_process_historic_log_to_block(
     new_from_block: &U64,
     snapshot_to_block: &U64,
-    max_block_range_limitation: &Option<U64>,
+    current_block_range_limitation: &Option<U64>,
 ) -> U64 {
-    if let Some(max_block_range_limitation) = max_block_range_limitation {
-        let to_block = new_from_block + max_block_range_limitation;
+    if let Some(current_block_range_limitation) = current_block_range_limitation {
+        let to_block = new_from_block + current_block_range_limitation;
         if to_block > *snapshot_to_block {
             *snapshot_to_block
         } else {
@@ -638,11 +644,12 @@ fn calculate_process_historic_log_to_block(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_get_logs_error(
     err: ethers::providers::ProviderError,
-    tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
     current_filter: RindexerEventFilter,
-    mut max_block_range_limitation: Option<U64>,
+    mut current_block_range_limitation: Option<U64>,
+    min_block_range_limitation: Option<U64>,
     info_log_name: &str,
 ) -> Option<ProcessHistoricLogsStreamResult> {
     let from_block = current_filter.get_from_block();
@@ -660,13 +667,16 @@ fn handle_get_logs_error(
                 "Retrying with block range"
             );
 
-            max_block_range_limitation = decrease_max_block_range(max_block_range_limitation);
+            current_block_range_limitation = decrease_max_block_range(
+                current_block_range_limitation,
+                min_block_range_limitation,
+            );
 
             return Some(ProcessHistoricLogsStreamResult {
                 next: current_filter
                     .set_from_block(retry_result.from)
                     .set_to_block(retry_result.to),
-                block_range: max_block_range_limitation,
+                block_range: current_block_range_limitation,
             });
         }
     }
@@ -680,10 +690,11 @@ fn handle_get_logs_error(
         "Error encountered, retrying with adjusted block range."
     );
 
-    // Retry with half the max_block_range_limitation, if available.
-    if let Some(max_range) = max_block_range_limitation {
+    // Retry with half the current_block_range_limitation, if available.
+    if let Some(max_range) = current_block_range_limitation {
         let new_range = max_range / U64::from(2);
-        let new_max_block_range_limitation = decrease_max_block_range(Some(new_range));
+        let new_current_block_range_limitation =
+            decrease_max_block_range(Some(new_range), min_block_range_limitation);
 
         let new_to_block = std::cmp::min(from_block + new_range, to_block); // Ensure we don't exceed original to_block
 
@@ -691,44 +702,41 @@ fn handle_get_logs_error(
         if new_range == U64::from(0) {
             return Some(ProcessHistoricLogsStreamResult {
                 next: current_filter.clone(), // Retry with the same filter
-                block_range: new_max_block_range_limitation,
+                block_range: new_current_block_range_limitation,
             });
         }
 
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.set_to_block(new_to_block),
-            block_range: new_max_block_range_limitation,
+            block_range: new_current_block_range_limitation,
         });
     } else {
         // if no max range is set, then retry with the same filter again
         return Some(ProcessHistoricLogsStreamResult {
             next: current_filter.clone(), // Retry with the same filter
-            block_range: max_block_range_limitation,
+            block_range: current_block_range_limitation,
         });
     }
-
-    error!(
-        log_name = %info_log_name,
-        indexing_status = %IndexingEventProgressStatus::Syncing.log(),
-        error = %err,
-        from_block = %from_block,
-        to_block = %to_block,
-        "Error fetching logs"
-    );
-    let _ = tx.send(Err(Box::new(err)));
-    None
 }
 
-fn increase_max_block_range(current_max_block_range: Option<U64>) -> Option<U64> {
+fn increase_max_block_range(
+    current_max_block_range: Option<U64>,
+    min_block_range_limitation: Option<U64>,
+) -> Option<U64> {
+    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
     let current_range = current_max_block_range.unwrap_or(U64::from(100)); // Default starting range if None
     let increased_range = std::cmp::min(current_range * U64::from(2), U64::from(10000));
-    Some(std::cmp::max(increased_range, U64::from(10))) // Ensure minimum range is 10
+    Some(std::cmp::max(increased_range, min_range)) // Ensure minimum range
 }
 
-fn decrease_max_block_range(current_max_block_range: Option<U64>) -> Option<U64> {
+fn decrease_max_block_range(
+    current_max_block_range: Option<U64>,
+    min_block_range_limitation: Option<U64>,
+) -> Option<U64> {
+    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
     match current_max_block_range {
         Some(current_range) => {
-            let decreased_range = std::cmp::max(current_range / U64::from(2), U64::from(10));
+            let decreased_range = std::cmp::max(current_range / U64::from(2), min_range);
             Some(decreased_range)
         }
         None => None, // If no limit was initially set, we don't introduce one on failure.
