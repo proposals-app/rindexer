@@ -17,14 +17,13 @@ fn create_shadow_client(
     rpc_url: &str,
     compute_units_per_second: Option<u64>,
     max_block_range: Option<U64>,
-    min_block_range: Option<U64>,
 ) -> Result<Arc<JsonRpcCachedProvider>, RetryClientError> {
     let mut header = HeaderMap::new();
     header.insert(
         "X-SHADOW-API-KEY",
         public_read_env_value("RINDEXER_PHANTOM_API_KEY").unwrap().parse().unwrap(),
     );
-    create_client(rpc_url, compute_units_per_second, max_block_range, min_block_range, header)
+    create_client(rpc_url, compute_units_per_second, max_block_range, header)
 }
 
 lazy_static! {
@@ -33,14 +32,12 @@ lazy_static! {
             .unwrap_or("https://mainnet.gateway.tenderly.co".to_string()),
         None,
         None,
-        None,
         HeaderMap::new()
     )
     .expect("Error creating provider");
     static ref BASE_PROVIDER: Arc<JsonRpcCachedProvider> = create_client(
         &public_read_env_value("https://mainnet.base.org")
             .unwrap_or("https://mainnet.base.org".to_string()),
-        None,
         None,
         None,
         HeaderMap::new()

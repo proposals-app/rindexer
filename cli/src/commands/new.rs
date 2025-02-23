@@ -140,7 +140,6 @@ pub fn handle_new_command(
             rpc: "https://mainnet.gateway.tenderly.co".to_string(),
             compute_units_per_second: None,
             max_block_range: None,
-            min_block_range: None,
             disable_logs_bloom_checks: None,
         }],
         contracts: vec![Contract {
