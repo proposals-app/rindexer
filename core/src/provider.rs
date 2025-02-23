@@ -22,6 +22,7 @@ pub struct JsonRpcCachedProvider {
     provider: Arc<Provider<RetryClient<Http>>>,
     cache: Mutex<Option<(Instant, Arc<Block<H256>>)>>,
     pub max_block_range: Option<U64>,
+    pub min_block_range: Option<U64>,
 }
 
 /// TODO: This is a temporary type until we migrate to alloy
@@ -35,11 +36,16 @@ pub struct WrappedLog {
 }
 
 impl JsonRpcCachedProvider {
-    pub fn new(provider: Provider<RetryClient<Http>>, max_block_range: Option<U64>) -> Self {
+    pub fn new(
+        provider: Provider<RetryClient<Http>>,
+        max_block_range: Option<U64>,
+        min_block_range: Option<U64>,
+    ) -> Self {
         JsonRpcCachedProvider {
             provider: Arc::new(provider),
             cache: Mutex::new(None),
             max_block_range,
+            min_block_range,
         }
     }
 
@@ -106,6 +112,7 @@ pub fn create_client(
     rpc_url: &str,
     compute_units_per_second: Option<u64>,
     max_block_range: Option<U64>,
+    min_block_range: Option<U64>,
     custom_headers: HeaderMap,
 ) -> Result<Arc<JsonRpcCachedProvider>, RetryClientError> {
     let url = Url::parse(rpc_url).map_err(|e| {
@@ -123,7 +130,7 @@ pub fn create_client(
             .initial_backoff(Duration::from_millis(500))
             .build(provider, Box::<ethers::providers::HttpRateLimitRetryPolicy>::default()),
     );
-    Ok(Arc::new(JsonRpcCachedProvider::new(instance, max_block_range)))
+    Ok(Arc::new(JsonRpcCachedProvider::new(instance, max_block_range, min_block_range)))
 }
 
 pub async fn get_chain_id(rpc_url: &str) -> Result<U256, ProviderError> {
@@ -148,6 +155,7 @@ impl CreateNetworkProvider {
                 &network.rpc,
                 network.compute_units_per_second,
                 network.max_block_range,
+                network.min_block_range,
                 manifest.get_custom_headers(),
             )?;
             result.push(CreateNetworkProvider {
@@ -168,14 +176,14 @@ mod tests {
     #[test]
     fn test_create_retry_client() {
         let rpc_url = "http://localhost:8545";
-        let result = create_client(rpc_url, Some(660), None, HeaderMap::new());
+        let result = create_client(rpc_url, Some(660), None, None, HeaderMap::new());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_create_retry_client_invalid_url() {
         let rpc_url = "invalid_url";
-        let result = create_client(rpc_url, Some(660), None, HeaderMap::new());
+        let result = create_client(rpc_url, Some(660), None, None, HeaderMap::new());
         assert!(result.is_err());
         if let Err(RetryClientError::HttpProviderCantBeCreated(url, _)) = result {
             assert_eq!(url, rpc_url);
