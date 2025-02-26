@@ -323,7 +323,7 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 continue;
                             }
 
-                            let to_block = safe_block_number;
+                            let mut to_block = safe_block_number;
                             if from_block == to_block &&
                                 !config.network_contract.disable_logs_bloom_checks &&
                                 !is_relevant_block(
@@ -357,6 +357,27 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                     .lock()
                                     .await = ordering_live_indexing_details;
                                 continue;
+                            }
+
+                            // Enforce max range if max_block_range is defined
+                            if to_block >= from_block {
+                                let block_range = to_block - from_block + 1;
+                                if let Some(max_block_range) =
+                                    config.network_contract.cached_provider.max_block_range
+                                {
+                                    if block_range > max_block_range {
+                                        to_block = from_block + max_block_range - 1;
+
+                                        debug!(
+                                            log_name = &config.info_log_name,
+                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                            max_block_range=  % max_block_range,
+                                            from_block=%from_block,
+                                            to_block=%to_block,
+                                            "Block range exceeded max limit",
+                                        );
+                                    }
+                                }
                             }
 
                             ordering_live_indexing_details.filter =
