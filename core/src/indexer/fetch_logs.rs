@@ -15,7 +15,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     event::{config::EventProcessingConfig, RindexerEventFilter},
-    indexer::{log_helpers::is_relevant_block, IndexingEventProgressStatus},
+    indexer::{
+        log_helpers::{decrease_max_block_range, increase_max_block_range, is_relevant_block},
+        IndexingEventProgressStatus,
+    },
     provider::{JsonRpcCachedProvider, WrappedLog},
 };
 
@@ -504,7 +507,7 @@ async fn live_indexing_stream(
                                         error = %err,
                                         from_block = %from_block,
                                         to_block = %to_block,
-                                        current_block_range_limitation = %current_block_range_limitation,
+                                        current_block_range_limitation = ?current_block_range_limitation,
                                         "Error fetching logs for live indexing"
                                     );
                                     current_block_range_limitation = decrease_max_block_range(
@@ -756,29 +759,5 @@ fn handle_get_logs_error(
             next: current_filter.clone(), // Retry with the same filter
             block_range: current_block_range_limitation,
         });
-    }
-}
-
-fn increase_max_block_range(
-    current_max_block_range: Option<U64>,
-    min_block_range_limitation: Option<U64>,
-) -> Option<U64> {
-    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
-    let current_range = current_max_block_range.unwrap_or(U64::from(100)); // Default starting range if None
-    let increased_range = std::cmp::min(current_range * U64::from(2), U64::from(10000));
-    Some(std::cmp::max(increased_range, min_range)) // Ensure minimum range
-}
-
-fn decrease_max_block_range(
-    current_max_block_range: Option<U64>,
-    min_block_range_limitation: Option<U64>,
-) -> Option<U64> {
-    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
-    match current_max_block_range {
-        Some(current_range) => {
-            let decreased_range = std::cmp::max(current_range / U64::from(2), min_range);
-            Some(decreased_range)
-        }
-        None => None, // If no limit was initially set, we don't introduce one on failure.
     }
 }

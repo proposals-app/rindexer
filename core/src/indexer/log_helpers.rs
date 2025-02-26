@@ -4,7 +4,7 @@ use ethers::{
     abi::{Event, Log as ParsedLog, LogParam, RawLog, Token},
     addressbook::Address,
     prelude::{Block, Bloom, FilteredParams, ValueOrArray, H256, U256},
-    types::{BigEndianHash, Log},
+    types::{BigEndianHash, Log, U64},
     utils::keccak256,
 };
 
@@ -123,5 +123,29 @@ pub fn is_relevant_block(
 
             true
         }
+    }
+}
+
+pub fn increase_max_block_range(
+    current_max_block_range: Option<U64>,
+    min_block_range_limitation: Option<U64>,
+) -> Option<U64> {
+    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
+    let current_range = current_max_block_range.unwrap_or(U64::from(100)); // Default starting range if None
+    let increased_range = std::cmp::min(current_range * U64::from(2), U64::from(10000));
+    Some(std::cmp::max(increased_range, min_range)) // Ensure minimum range
+}
+
+pub fn decrease_max_block_range(
+    current_max_block_range: Option<U64>,
+    min_block_range_limitation: Option<U64>,
+) -> Option<U64> {
+    let min_range = min_block_range_limitation.unwrap_or(U64::from(10)); // Default minimum range
+    match current_max_block_range {
+        Some(current_range) => {
+            let decreased_range = std::cmp::max(current_range / U64::from(2), min_range);
+            Some(decreased_range)
+        }
+        None => None, // If no limit was initially set, we don't introduce one on failure.
     }
 }
