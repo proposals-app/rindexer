@@ -46,7 +46,7 @@ pub fn fetch_logs_stream(
         let min_block_range_limitation = config.network_contract.cached_provider.min_block_range;
 
         if current_block_range_limitation.is_some() {
-            current_filter = current_filter.set_to_block(calculate_process_historic_log_to_block(
+            current_filter = current_filter.set_to_block(calculate_process_live_log_to_block(
                 &from_block,
                 &snapshot_to_block,
                 &current_block_range_limitation,
@@ -125,6 +125,8 @@ pub fn fetch_logs_stream(
                 &config.info_log_name,
                 &config.semaphore,
                 config.network_contract.disable_logs_bloom_checks,
+                current_block_range_limitation,
+                min_block_range_limitation,
             )
             .await;
         }
@@ -234,7 +236,7 @@ async fn fetch_historic_logs_stream(
                 return if next_from_block > snapshot_to_block {
                     None
                 } else {
-                    let new_to_block = calculate_process_historic_log_to_block(
+                    let new_to_block = calculate_process_live_log_to_block(
                         &next_from_block,
                         &snapshot_to_block,
                         &current_block_range_limitation,
@@ -323,6 +325,8 @@ async fn live_indexing_stream(
     info_log_name: &str,
     semaphore: &Arc<Semaphore>,
     disable_logs_bloom_checks: bool,
+    mut current_block_range_limitation: Option<U64>, // Added current_block_range_limitation
+    min_block_range_limitation: Option<U64>,         // Added min_block_range_limitation
 ) {
     let mut last_seen_block_number = U64::from(0);
 
@@ -377,7 +381,14 @@ async fn live_indexing_stream(
                             continue;
                         }
 
-                        let to_block = safe_block_number;
+                        let target_to_block = safe_block_number;
+                        let limited_to_block = calculate_process_historic_log_to_block(
+                            &current_filter.get_from_block(),
+                            &target_to_block,
+                            &current_block_range_limitation,
+                        );
+                        let to_block = limited_to_block;
+
                         if from_block == to_block &&
                             !disable_logs_bloom_checks &&
                             !is_relevant_block(contract_address, topic_id, &latest_block)
@@ -456,6 +467,12 @@ async fn live_indexing_stream(
                                         break;
                                     }
 
+                                    current_block_range_limitation = increase_max_block_range(
+                                        // Increase block range on success
+                                        current_block_range_limitation,
+                                        min_block_range_limitation,
+                                    );
+
                                     if logs_empty {
                                         current_filter =
                                             current_filter.set_from_block(to_block + 1);
@@ -488,6 +505,11 @@ async fn live_indexing_stream(
                                         from_block = %from_block,
                                         to_block = %to_block,
                                         "Error fetching logs for live indexing"
+                                    );
+                                    current_block_range_limitation = decrease_max_block_range(
+                                        // Decrease block range on error
+                                        current_block_range_limitation,
+                                        min_block_range_limitation,
                                     );
                                     drop(permit);
                                 }
@@ -625,6 +647,23 @@ fn retry_with_block_range(
     }
 
     None
+}
+
+fn calculate_process_live_log_to_block(
+    new_from_block: &U64,
+    snapshot_to_block: &U64,
+    current_block_range_limitation: &Option<U64>,
+) -> U64 {
+    if let Some(current_block_range_limitation) = current_block_range_limitation {
+        let to_block = new_from_block + current_block_range_limitation;
+        if to_block > *snapshot_to_block {
+            *snapshot_to_block
+        } else {
+            to_block
+        }
+    } else {
+        *snapshot_to_block
+    }
 }
 
 fn calculate_process_historic_log_to_block(
