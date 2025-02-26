@@ -504,6 +504,7 @@ async fn live_indexing_stream(
                                         error = %err,
                                         from_block = %from_block,
                                         to_block = %to_block,
+                                        current_block_range_limitation = %current_block_range_limitation,
                                         "Error fetching logs for live indexing"
                                     );
                                     current_block_range_limitation = decrease_max_block_range(
