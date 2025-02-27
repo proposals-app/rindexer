@@ -250,6 +250,12 @@ async fn fetch_historic_logs_stream(
             );
 
             if logs_empty {
+                info!(
+                    log_name = %info_log_name,
+                    from_block = %from_block,
+                    to_block = %to_block,
+                    "No events found between blocks"
+                );
                 let next_from_block = to_block + 1;
                 return if next_from_block > snapshot_to_block {
                     None
@@ -547,6 +553,13 @@ async fn live_indexing_stream(
                                             indexing_details.filter = indexing_details
                                                 .filter
                                                 .set_from_block(to_block + 1);
+                                            info!(
+                                                log_name = %config.info_log_name,
+                                                indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                                from_block = %from_block,
+                                                to_block = %to_block,
+                                                "No events found between blocks"
+                                            );
                                         } else if let Some(last_log) = last_log {
                                             if let Some(last_log_block_number) =
                                                 last_log.inner.block_number
