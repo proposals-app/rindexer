@@ -751,7 +751,7 @@ fn calculate_process_live_log_to_block(
     current_block_range_limitation: &Option<U64>,
 ) -> U64 {
     if let Some(current_block_range_limitation) = current_block_range_limitation {
-        let to_block = new_from_block + current_block_range_limitation - 1;
+        let to_block = new_from_block + current_block_range_limitation;
         if to_block > *snapshot_to_block {
             *snapshot_to_block
         } else {
@@ -768,7 +768,7 @@ fn calculate_process_historic_log_to_block(
     current_block_range_limitation: &Option<U64>,
 ) -> U64 {
     if let Some(current_block_range_limitation) = current_block_range_limitation {
-        let to_block = new_from_block + current_block_range_limitation - 1;
+        let to_block = new_from_block + current_block_range_limitation;
         if to_block > *snapshot_to_block {
             *snapshot_to_block
         } else {
