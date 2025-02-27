@@ -16,6 +16,7 @@ pub enum IndexingEventProgressStatus {
     Live,
     Completed,
     Failed,
+    Indexed,
 }
 
 impl IndexingEventProgressStatus {
@@ -25,6 +26,7 @@ impl IndexingEventProgressStatus {
             Self::Live => "LIVE",
             Self::Completed => "COMPLETED",
             Self::Failed => "FAILED",
+            Self::Indexed => "INDEXED",
         }
     }
 
