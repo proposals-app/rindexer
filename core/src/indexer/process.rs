@@ -42,7 +42,11 @@ pub async fn process_event(
     config: EventProcessingConfig,
     block_until_indexed: bool,
 ) -> Result<(), ProcessEventError> {
-    debug!("{} - Processing events", config.info_log_name);
+    info!(
+        event_name = %config.event_name,
+        contract_name = %config.contract_name,
+        "Processing events"
+    );
 
     process_event_logs(Arc::new(config), false, block_until_indexed).await?;
 
@@ -194,12 +198,12 @@ async fn process_contract_events_with_dependencies(
                 Ok(result) => match result {
                     Ok(_) => {}
                     Err(e) => {
-                        error!("Error processing logs due to dependencies error: {:?}", e);
+                        error!(error = %e, "Error processing logs due to dependencies error");
                         return Err(e);
                     }
                 },
                 Err(e) => {
-                    error!("Error processing logs: {:?}", e);
+                    error!(error = %e, "Error processing logs");
                     return Err(ProcessContractEventsWithDependenciesError::JoinError(e));
                 }
             }
@@ -276,9 +280,10 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 latest_block_number
                             {
                                 debug!(
-                                    "{} - {} - No new blocks to process...",
-                                    &config.info_log_name,
-                                    IndexingEventProgressStatus::Live.log()
+                                    event_name = %config.event_name,
+                                    contract_name = %config.contract_name,
+                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                    "No new blocks to process..."
                                 );
                                 if ordering_live_indexing_details
                                     .last_no_new_block_log_time
@@ -286,10 +291,11 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                     log_no_new_block_interval
                                 {
                                     info!(
-                                        "{} - {} - No new blocks published in the last 5 minutes - latest block number {}",
-                                        &config.info_log_name,
-                                        IndexingEventProgressStatus::Live.log(),
-                                        latest_block_number
+                                        event_name = %config.event_name,
+                                        contract_name = %config.contract_name,
+                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                        latest_block_number = %latest_block_number,
+                                        "No new blocks published in the last 5 minutes"
                                     );
                                     ordering_live_indexing_details.last_no_new_block_log_time =
                                         Instant::now();
@@ -302,11 +308,12 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 continue;
                             }
                             debug!(
-                                "{} - {} - New block seen {} - Last seen block {}",
-                                &config.info_log_name,
-                                IndexingEventProgressStatus::Live.log(),
-                                latest_block_number,
-                                ordering_live_indexing_details.last_seen_block_number
+                                event_name = %config.event_name,
+                                contract_name = %config.contract_name,
+                                indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                latest_block_number = %latest_block_number,
+                                last_seen_block_number = %ordering_live_indexing_details.last_seen_block_number,
+                                "New block seen"
                             );
                             let reorg_safe_distance = &config.indexing_distance_from_head;
                             let safe_block_number = latest_block_number - reorg_safe_distance;
@@ -314,11 +321,12 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                             // check reorg distance and skip if not safe
                             if from_block > safe_block_number {
                                 info!(
-                                    "{} - {} - not in safe reorg block range yet block: {} > range: {}",
-                                    &config.info_log_name,
-                                    IndexingEventProgressStatus::Live.log(),
-                                    from_block,
-                                    safe_block_number
+                                    event_name = %config.event_name,
+                                    contract_name = %config.contract_name,
+                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                    from_block = %from_block,
+                                    safe_block_number = %safe_block_number,
+                                    "not in safe reorg block range yet"
                                 );
                                 continue;
                             }
@@ -333,16 +341,18 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 )
                             {
                                 debug!(
-                                    "{} - {} - Skipping block {} as it's not relevant",
-                                    &config.info_log_name,
-                                    IndexingEventProgressStatus::Live.log(),
-                                    from_block
+                                    event_name = %config.event_name,
+                                    contract_name = %config.contract_name,
+                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                    block_number = %from_block,
+                                    "Skipping block as it's not relevant"
                                 );
                                 debug!(
-                                    "{} - {} - Did not need to hit RPC as no events in {} block - LogsBloom for block checked",
-                                    &config.info_log_name,
-                                    IndexingEventProgressStatus::Live.log(),
-                                    from_block
+                                    event_name = %config.event_name,
+                                    contract_name = %config.contract_name,
+                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                    block_number = %from_block,
+                                    "Did not need to hit RPC as no events in block - LogsBloom for block checked"
                                 );
 
                                 ordering_live_indexing_details.filter =
@@ -360,23 +370,22 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                             }
 
                             // Enforce max range if max_block_range is defined
-                            if to_block >= from_block {
+                            if let Some(max_block_range) =
+                                config.network_contract.cached_provider.max_block_range
+                            {
                                 let block_range = to_block - from_block + 1;
-                                if let Some(max_block_range) =
-                                    config.network_contract.cached_provider.max_block_range
-                                {
-                                    if block_range > max_block_range {
-                                        to_block = from_block + max_block_range - 1;
+                                if block_range > max_block_range {
+                                    to_block = from_block + max_block_range - 1;
 
-                                        debug!(
-                                            log_name = &config.info_log_name,
-                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                            max_block_range=  % max_block_range,
-                                            from_block=%from_block,
-                                            to_block=%to_block,
-                                            "Block range exceeded max limit",
-                                        );
-                                    }
+                                    debug!(
+                                        event_name = %config.event_name,
+                                        contract_name = %config.contract_name,
+                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                        max_block_range=  % max_block_range,
+                                        from_block=%from_block,
+                                        to_block=%to_block,
+                                        "Block range exceeded max limit",
+                                    );
                                 }
                             }
 
@@ -384,10 +393,11 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 ordering_live_indexing_details.filter.set_to_block(to_block);
 
                             debug!(
-                                "{} - {} - Processing live filter: {:?}",
-                                &config.info_log_name,
-                                IndexingEventProgressStatus::Live.log(),
-                                ordering_live_indexing_details.filter
+                                event_name = %config.event_name,
+                                contract_name = %config.contract_name,
+                                indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                filter = ?ordering_live_indexing_details.filter,
+                                "Processing live filter"
                             );
 
                             let semaphore_client = Arc::clone(&config.semaphore);
@@ -402,22 +412,24 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                 {
                                     Ok(logs) => {
                                         debug!(
-                                            "{} - {} - Live topic_id {}, Logs: {} from {} to {}",
-                                            &config.info_log_name,
-                                            IndexingEventProgressStatus::Live.log(),
-                                            &config.topic_id,
-                                            logs.len(),
-                                            from_block,
-                                            to_block
+                                            event_name = %config.event_name,
+                                            contract_name = %config.contract_name,
+                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                            topic_id = %config.topic_id,
+                                            logs_count = logs.len(),
+                                            from_block = %from_block,
+                                            to_block = %to_block,
+                                            "Live topic logs fetched"
                                         );
 
                                         debug!(
-                                            "{} - {} - Fetched {} event logs - blocks: {} - {}",
-                                            &config.info_log_name,
-                                            IndexingEventProgressStatus::Live.log(),
-                                            logs.len(),
-                                            from_block,
-                                            to_block
+                                            event_name = %config.event_name,
+                                            contract_name = %config.contract_name,
+                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                            logs_count = logs.len(),
+                                            from_block = %from_block,
+                                            to_block = %to_block,
+                                            "Fetched event logs"
                                         );
 
                                         let logs_empty = logs.is_empty();
@@ -436,10 +448,11 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                 let complete = task.await;
                                                 if let Err(e) = complete {
                                                     error!(
-                                                        "{} - {} - Error indexing task: {} - will try again in 200ms",
-                                                        &config.info_log_name,
-                                                        IndexingEventProgressStatus::Live.log(),
-                                                        e
+                                                        event_name = %config.event_name,
+                                                        contract_name = %config.contract_name,
+                                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                                        error = %e,
+                                                        "Error indexing task - will try again in 200ms"
                                                     );
                                                     drop(permit);
                                                     break;
@@ -452,11 +465,12 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                             .filter
                                                             .set_from_block(to_block + 1);
                                                     info!(
-                                                        "{} - {} - No events found between blocks {} - {}",
-                                                        &config.info_log_name,
-                                                        IndexingEventProgressStatus::Live.log(),
-                                                        from_block,
-                                                        to_block
+                                                        event_name = %config.event_name,
+                                                        contract_name = %config.contract_name,
+                                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                                        from_block = %from_block,
+                                                        to_block = %to_block,
+                                                        "No events found between blocks"
                                                     );
                                                 } else if let Some(last_log) = last_log {
                                                     if let Some(last_log_block_number) =
@@ -466,8 +480,7 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                             ordering_live_indexing_details
                                                                 .filter
                                                                 .set_from_block(
-                                                                    last_log_block_number +
-                                                                        U64::from(1),
+                                                                    last_log_block_number + 1,
                                                                 );
                                                     } else {
                                                         error!("Failed to get last log block number the provider returned null (should never happen) - try again in 200ms");
@@ -484,10 +497,11 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                             }
                                             Err(err) => {
                                                 error!(
-                                                    "{} - {} - Error fetching logs: {} - will try again in 200ms",
-                                                    &config.info_log_name,
-                                                    IndexingEventProgressStatus::Live.log(),
-                                                    err
+                                                    event_name = %config.event_name,
+                                                    contract_name = %config.contract_name,
+                                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                                    error = %err,
+                                                    "Error fetching logs - will try again in 200ms"
                                                 );
                                                 drop(permit);
                                                 break;
@@ -496,10 +510,11 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                     }
                                     Err(err) => {
                                         error!(
-                                            "{} - {} - Error fetching logs: {} - will try again in 200ms",
-                                            &config.info_log_name,
-                                            IndexingEventProgressStatus::Live.log(),
-                                            err
+                                            event_name = %config.event_name,
+                                            contract_name = %config.contract_name,
+                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                            error = %err,
+                                            "Error fetching logs - will try again in 200ms"
                                         );
                                         drop(permit);
                                         break;
@@ -515,8 +530,8 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                 }
                 Err(error) => {
                     error!(
-                        "Failed to get latest block, will try again in 200ms - error: {}",
-                        error.to_string()
+                        error = %error,
+                        "Failed to get latest block, will try again in 200ms"
                     );
                 }
             }
@@ -540,7 +555,12 @@ async fn handle_logs_result(
 ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send>> {
     match result {
         Ok(result) => {
-            debug!("Processing logs {} - length {}", config.event_name, result.logs.len());
+            debug!(
+                event_name = %config.event_name,
+                contract_name = %config.contract_name,
+                logs_count = result.logs.len(),
+                "Processing logs"
+            );
 
             let fn_data = result
                 .logs
@@ -575,7 +595,7 @@ async fn handle_logs_result(
             Ok(tokio::spawn(async {})) // Return a completed task
         }
         Err(e) => {
-            error!("Error fetching logs: {:?}", e);
+            error!(error = %e, "Error fetching logs");
             Err(e)
         }
     }

@@ -285,11 +285,11 @@ async fn fetch_historic_logs_stream(
                     );
 
                     debug!(
-                        "{} - {} - new_from_block {:?} new_to_block {:?}",
-                        info_log_name,
-                        IndexingEventProgressStatus::Syncing.log(),
-                        next_from_block,
-                        new_to_block
+                        log_name = %info_log_name,
+                        indexing_status = %IndexingEventProgressStatus::Syncing.log(),
+                        new_from_block = %next_from_block,
+                        new_to_block = %new_to_block,
+                        "Moving to next block range"
                     );
 
                     Some(ProcessHistoricLogsStreamResult {
