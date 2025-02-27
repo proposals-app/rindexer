@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, str::FromStr, sync::Arc, time::Duration};
+use std::{error::Error, str::FromStr, sync::Arc, time::Duration};
 
 use ethers::{
     addressbook::Address,
@@ -8,7 +8,7 @@ use ethers::{
 use regex::Regex;
 use tokio::{
     sync::{mpsc, Semaphore},
-    time::{sleep, Instant},
+    time::Instant,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
@@ -28,27 +28,15 @@ pub struct FetchLogsResult {
     pub to_block: U64,
 }
 
-pub struct LiveIndexingConfig {
-    pub contract_address: Option<ValueOrArray<Address>>,
-    pub topic_id: H256,
-    pub reorg_safe_distance: U64,
-    pub filter: RindexerEventFilter,
-    pub info_log_name: String,
-    pub disable_logs_bloom_checks: bool,
-    pub cached_provider: Arc<JsonRpcCachedProvider>,
-    pub semaphore: Arc<Semaphore>,
-}
-
 pub fn fetch_logs_stream(
     config: Arc<EventProcessingConfig>,
-    live_indexing_configs: Option<Vec<LiveIndexingConfig>>,
-    block_until_indexed: bool,
+    force_no_live_indexing: bool,
 ) -> impl tokio_stream::Stream<Item = Result<FetchLogsResult, Box<dyn Error + Send>>> + Send + Unpin
 {
     let (tx, rx) = mpsc::unbounded_channel();
-    let tx_clone_for_stream = tx.clone(); // Clone tx for use in the stream
 
     let initial_filter = config.to_event_filter().unwrap();
+    let contract_address = initial_filter.contract_address();
 
     tokio::spawn(async move {
         let snapshot_to_block = initial_filter.get_to_block();
@@ -57,6 +45,7 @@ pub fn fetch_logs_stream(
 
         let mut current_block_range_limitation =
             config.network_contract.cached_provider.max_block_range;
+
         let min_block_range_limitation = config.network_contract.cached_provider.min_block_range;
 
         if current_block_range_limitation.is_some() {
@@ -72,34 +61,42 @@ pub fn fetch_logs_stream(
                 "max block range limitation applied - block range indexing will be slower then RPC providers supplying the optimal ranges - https://rindexer.xyz/docs/references/rpc-node-providers#rpc-node-providers"
             );
         }
-        let mut tasks = vec![];
         while current_filter.get_from_block() <= snapshot_to_block {
             let semaphore_client = Arc::clone(&config.semaphore);
             let permit = semaphore_client.acquire_owned().await;
 
             match permit {
-                Ok(_permit) => {
-                    let config_clone = config.clone();
-                    let tx_clone = tx_clone_for_stream.clone(); // Clone tx for each task
-                    let current_filter_clone = current_filter.clone(); // Clone current_filter for each task
-                    let current_block_range_limitation_clone =
-                        current_block_range_limitation.clone();
-                    let min_block_range_limitation_clone = min_block_range_limitation.clone();
+                Ok(permit) => {
+                    let result = fetch_historic_logs_stream(
+                        &config.network_contract.cached_provider,
+                        &tx,
+                        &config.topic_id,
+                        current_filter.clone(),
+                        current_block_range_limitation,
+                        min_block_range_limitation,
+                        snapshot_to_block,
+                        &config.info_log_name,
+                    )
+                    .await;
 
-                    let task = tokio::spawn(async move {
-                        fetch_historic_logs_stream(
-                            &config_clone.network_contract.cached_provider,
-                            &tx_clone,
-                            &config_clone.topic_id,
-                            current_filter_clone,
-                            current_block_range_limitation_clone,
-                            min_block_range_limitation_clone,
-                            snapshot_to_block,
-                            &config_clone.info_log_name,
-                        )
-                        .await
-                    });
-                    tasks.push(task);
+                    drop(permit);
+
+                    // slow indexing warn user
+                    if let Some(range) = current_block_range_limitation {
+                        debug!(
+                            log_name = %config.info_log_name,
+                            indexing_status = %IndexingEventProgressStatus::Syncing.log(),
+                            block_range_limit = %range,
+                            "RPC PROVIDER IS SLOW - Slow indexing mode enabled, max block range limitation - we advise using a faster provider who can predict the next block ranges."
+                        );
+                    }
+
+                    if let Some(result) = result {
+                        current_filter = result.next;
+                        current_block_range_limitation = result.block_range;
+                    } else {
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -111,30 +108,6 @@ pub fn fetch_logs_stream(
                     continue;
                 }
             }
-            if block_until_indexed {
-                // Use block_until_indexed here
-                if let Some(result) = tasks.last_mut() {
-                    match tokio::join!(result) {
-                        (Ok(task_result),) => {
-                            if let Some(stream_result) = task_result {
-                                current_filter = stream_result.next;
-                                current_block_range_limitation = stream_result.block_range;
-                            } else {
-                                break; // No more historical data to process.
-                            }
-                        }
-                        _ => {
-                            error!(log_name = %config.info_log_name, "Task panicked");
-                            break;
-                        }
-                    }
-                }
-            } else {
-                if tasks.last().is_some() {
-                    // in non-blocking mode, historical stream processing continues without waiting
-                    // for each task to finish before starting the next.
-                }
-            }
         }
 
         info!(
@@ -144,11 +117,17 @@ pub fn fetch_logs_stream(
         );
 
         // Live indexing mode
-        if let Some(live_configs) = live_indexing_configs {
-            // Use the modified live_indexing_stream
+        if config.live_indexing && !force_no_live_indexing {
             live_indexing_stream(
-                &tx_clone_for_stream,
-                live_configs,
+                &config.network_contract.cached_provider,
+                &tx,
+                &contract_address,
+                &config.topic_id,
+                &config.indexing_distance_from_head,
+                current_filter,
+                &config.info_log_name,
+                &config.semaphore,
+                config.network_contract.disable_logs_bloom_checks,
                 current_block_range_limitation,
                 min_block_range_limitation,
             )
@@ -336,294 +315,223 @@ async fn fetch_historic_logs_stream(
     None
 }
 
-#[derive(Clone, Debug)]
-struct IndexingDetails {
-    filter: RindexerEventFilter,
-    last_seen_block_number: U64,
-    last_no_new_block_log_time: Instant,
-}
-
 /// Handles live indexing mode, continuously checking for new blocks, ensuring they are
 /// within a safe range, updating the filter, and sending the logs to the provided channel.
+#[allow(clippy::too_many_arguments)]
 async fn live_indexing_stream(
+    cached_provider: &Arc<JsonRpcCachedProvider>,
     tx: &mpsc::UnboundedSender<Result<FetchLogsResult, Box<dyn Error + Send>>>,
-    live_indexing_configs: Vec<LiveIndexingConfig>,
+    contract_address: &Option<ValueOrArray<Address>>,
+    topic_id: &H256,
+    reorg_safe_distance: &U64,
+    mut current_filter: RindexerEventFilter,
+    info_log_name: &str,
+    semaphore: &Arc<Semaphore>,
+    disable_logs_bloom_checks: bool,
     mut current_block_range_limitation: Option<U64>, // Added current_block_range_limitation
     min_block_range_limitation: Option<U64>,         // Added min_block_range_limitation
 ) {
-    let mut indexing_details_map: HashMap<H256, IndexingDetails> = HashMap::new();
+    let mut last_seen_block_number = U64::from(0);
 
-    // Initialize state for each live indexing configuration
-    for config in &live_indexing_configs {
-        let last_seen_block_number = config.filter.get_to_block();
-        let mut filter = config.filter.clone();
-        let next_block_number = last_seen_block_number + 1;
-
-        filter = filter.set_from_block(next_block_number).set_to_block(next_block_number);
-
-        indexing_details_map.insert(
-            config.topic_id,
-            IndexingDetails {
-                filter,
-                last_seen_block_number,
-                last_no_new_block_log_time: Instant::now(),
-            },
-        );
-    }
     // this is used for less busy chains to make sure they know rindexer is still alive
+    let mut last_no_new_block_log_time = Instant::now();
     let log_no_new_block_interval = Duration::from_secs(300);
-    let mut error_retry_delay = Duration::from_millis(200); // Initial retry delay
-    let max_retry_delay = Duration::from_secs(60); // Maximum retry delay
 
     loop {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        for config in &live_indexing_configs {
-            let mut indexing_details = indexing_details_map
-                .get(&config.topic_id)
-                .expect("Failed to get indexing_details_map")
-                .clone();
-
-            let latest_block = &config.cached_provider.get_latest_block().await;
-
-            match latest_block {
-                Ok(latest_block) => {
-                    if let Some(latest_block) = latest_block {
-                        if let Some(latest_block_number) = latest_block.number {
-                            if indexing_details.last_seen_block_number == latest_block_number {
-                                debug!(
-                                    log_name = %config.info_log_name,
-                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                    "No new blocks to process..."
-                                );
-                                if indexing_details.last_no_new_block_log_time.elapsed() >=
-                                    log_no_new_block_interval
-                                {
-                                    info!(
-                                        log_name = %config.info_log_name,
-                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                        latest_block_number = %latest_block_number,
-                                        "No new blocks published in the last 5 minutes"
-                                    );
-                                    indexing_details.last_no_new_block_log_time = Instant::now();
-                                    indexing_details_map
-                                        .insert(config.topic_id, indexing_details.clone());
-                                }
-                                continue;
-                            }
+        let latest_block = cached_provider.get_latest_block().await;
+        match latest_block {
+            Ok(latest_block) => {
+                if let Some(latest_block) = latest_block {
+                    if let Some(latest_block_number) = latest_block.number {
+                        if last_seen_block_number == latest_block_number {
                             debug!(
-                                log_name = %config.info_log_name,
+                                log_name = %info_log_name,
                                 indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                latest_block_number = %latest_block_number,
-                                last_seen_block_number =
-                                    %indexing_details.last_seen_block_number,
-                                "New block seen"
+                                "No new blocks to process..."
                             );
-                            let reorg_safe_distance = &config.reorg_safe_distance;
-                            let safe_block_number = latest_block_number - reorg_safe_distance;
-                            let from_block = indexing_details.filter.get_from_block();
-                            // check reorg distance and skip if not safe
-                            if from_block > safe_block_number {
+                            if last_no_new_block_log_time.elapsed() >= log_no_new_block_interval {
                                 info!(
-                                    log_name = %config.info_log_name,
+                                    log_name = %info_log_name,
                                     indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                    from_block = %from_block,
-                                    safe_block_number = %safe_block_number,
-                                    "not in safe reorg block range yet"
+                                    latest_block_number = %last_seen_block_number,
+                                    "No new blocks published in the last 5 minutes - latest block number"
                                 );
-                                continue;
+                                last_no_new_block_log_time = Instant::now();
                             }
+                            continue;
+                        }
+                        debug!(
+                            log_name = %info_log_name,
+                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                            latest_block = %latest_block_number,
+                            last_seen_block = %last_seen_block_number,
+                            "New block seen - Last seen block"
+                        );
 
-                            let mut to_block = safe_block_number;
-                            if from_block == to_block &&
-                                !config.disable_logs_bloom_checks &&
-                                !is_relevant_block(
-                                    &config.contract_address,
-                                    &config.topic_id,
-                                    latest_block,
-                                )
-                            {
-                                debug!(
-                                    log_name = %config.info_log_name,
-                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                    block_number = %from_block,
-                                    "Skipping block as it's not relevant"
-                                );
-                                debug!(
-                                    log_name = %config.info_log_name,
-                                    indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                    block_number = %from_block,
-                                    "Did not need to hit RPC as no events in block - LogsBloom for block checked"
-                                );
-
-                                indexing_details.filter =
-                                    indexing_details.filter.set_from_block(to_block + 1);
-
-                                indexing_details.last_seen_block_number = to_block;
-                                indexing_details_map
-                                    .insert(config.topic_id, indexing_details.clone());
-                                continue;
-                            }
-
-                            // Enforce max range if max_block_range is defined
-                            if let Some(max_block_range) = config.cached_provider.max_block_range {
-                                let block_range = to_block - from_block + 1;
-                                if block_range > max_block_range {
-                                    to_block = from_block + max_block_range - 1;
-
-                                    debug!(
-                                        log_name = %config.info_log_name,
-                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                        max_block_range=  % max_block_range,
-                                        from_block=%from_block,
-                                        to_block=%to_block,
-                                        "Block range exceeded max limit",
-                                    );
-                                }
-                            }
-
-                            indexing_details.filter =
-                                indexing_details.filter.set_to_block(to_block);
-
-                            debug!(
-                                log_name = %config.info_log_name,
+                        let safe_block_number = latest_block_number - reorg_safe_distance;
+                        let from_block = current_filter.get_from_block();
+                        // check reorg distance and skip if not safe
+                        if from_block > safe_block_number {
+                            info!(
+                                log_name = %info_log_name,
                                 indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                filter = ?indexing_details.filter,
-                                "Processing live filter"
+                                current_block = %from_block,
+                                safe_block_range = %safe_block_number,
+                                "Not in safe reorg block range yet - current block > safe reorg range"
                             );
+                            continue;
+                        }
 
-                            let semaphore_client = Arc::clone(&config.semaphore);
-                            let permit = semaphore_client.acquire_owned().await;
+                        let target_to_block = safe_block_number;
+                        let limited_to_block = calculate_process_historic_log_to_block(
+                            &current_filter.get_from_block(),
+                            &target_to_block,
+                            &current_block_range_limitation,
+                        );
+                        let to_block = limited_to_block;
 
-                            if let Ok(permit) = permit {
-                                let get_logs_result =
-                                    config.cached_provider.get_logs(&indexing_details.filter).await;
+                        if from_block == to_block &&
+                            !disable_logs_bloom_checks &&
+                            !is_relevant_block(contract_address, topic_id, &latest_block)
+                        {
+                            debug!(
+                                log_name = %info_log_name,
+                                indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                block_number = %from_block,
+                                "Skipping block as it's not relevant"
+                            );
+                            debug!(
+                                log_name = %info_log_name,
+                                indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                block_number = %from_block,
+                                "Did not need to hit RPC as no events in block - LogsBloom for block checked"
+                            );
+                            current_filter = current_filter.set_from_block(to_block + 1);
+                            last_seen_block_number = to_block;
+                            continue;
+                        }
 
-                                match get_logs_result {
-                                    Ok(logs) => {
-                                        error_retry_delay = Duration::from_millis(200); // reset delay on success
-                                        debug!(
-                                            log_name = %config.info_log_name,
-                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                            topic_id = %config.topic_id,
-                                            logs_count = logs.len(),
-                                            from_block = %from_block,
-                                            to_block = %to_block,
-                                            "Live topic logs fetched"
-                                        );
+                        current_filter = current_filter.set_to_block(to_block);
+                        let block_range = to_block - from_block + 1u64;
 
-                                        debug!(
-                                            log_name = %config.info_log_name,
-                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                            logs_count = logs.len(),
-                                            from_block = %from_block,
-                                            to_block = %to_block,
-                                            "Fetched event logs"
-                                        );
+                        debug!(
+                            log_name = %info_log_name,
+                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                            filter = ?current_filter,
+                            from_block = %from_block,
+                            to_block = %to_block,
+                            block_range = %block_range,
+                            "Processing live filter"
+                        );
 
-                                        let logs_empty = logs.is_empty();
-                                        // clone here over the full logs way less overhead
-                                        let last_log = logs.last().cloned();
+                        let semaphore_client = Arc::clone(semaphore);
+                        let permit = semaphore_client.acquire_owned().await;
 
-                                        if tx
-                                            .send(Ok(FetchLogsResult {
-                                                logs,
-                                                from_block,
-                                                to_block,
-                                            }))
-                                            .is_err()
-                                        {
-                                            error!(
-                                                log_name = %config.info_log_name,
-                                                indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                                "Failed to send logs to stream consumer!"
-                                            );
-                                            drop(permit);
-                                            break;
-                                        }
+                        if let Ok(permit) = permit {
+                            match cached_provider.get_logs(&current_filter).await {
+                                Ok(logs) => {
+                                    debug!(
+                                        log_name = %info_log_name,
+                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                        topic_id = %topic_id,
+                                        log_count = logs.len(),
+                                        from_block = %from_block,
+                                        to_block = %to_block,
+                                        "Fetched logs for live block range"
+                                    );
+                                    info!(
+                                        log_name = %info_log_name,
+                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                        log_count = logs.len(),
+                                        from_block = %from_block,
+                                        to_block = %to_block,
+                                        block_range = %block_range,
+                                        "Fetched event logs for live block range"
+                                    );
 
-                                        current_block_range_limitation = increase_max_block_range(
-                                            // Increase block range on success
-                                            current_block_range_limitation,
-                                            min_block_range_limitation,
-                                        );
+                                    last_seen_block_number = to_block;
 
-                                        indexing_details.last_seen_block_number = to_block;
-                                        if logs_empty {
-                                            indexing_details.filter = indexing_details
-                                                .filter
-                                                .set_from_block(to_block + 1);
-                                            info!(
-                                                log_name = %config.info_log_name,
-                                                indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                                from_block = %from_block,
-                                                to_block = %to_block,
-                                                "No events found between blocks"
-                                            );
-                                        } else if let Some(last_log) = last_log {
-                                            if let Some(last_log_block_number) =
-                                                last_log.inner.block_number
-                                            {
-                                                indexing_details.filter = indexing_details
-                                                    .filter
-                                                    .set_from_block(last_log_block_number + 1);
-                                            } else {
-                                                error!("Failed to get last log block number the provider returned null (should never happen) - try again in after delay");
-                                                drop(permit);
-                                                sleep(error_retry_delay).await; // Introduce delay before retry
-                                                error_retry_delay =
-                                                    (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
-                                                continue; // continue to next iteration with
-                                                          // same block range
-                                            }
-                                        }
+                                    let logs_empty = logs.is_empty();
+                                    // clone here over the full logs way less overhead
+                                    let last_log = logs.last().cloned();
 
-                                        indexing_details_map
-                                            .insert(config.topic_id, indexing_details.clone());
-
-                                        drop(permit);
-                                    }
-                                    Err(err) => {
+                                    if tx
+                                        .send(Ok(FetchLogsResult { logs, from_block, to_block }))
+                                        .is_err()
+                                    {
                                         error!(
-                                            log_name = %config.info_log_name,
+                                            log_name = %info_log_name,
                                             indexing_status = %IndexingEventProgressStatus::Live.log(),
-                                            error = %err,
-                                            "Error fetching logs - will try again in after delay"
-                                        );
-                                        current_block_range_limitation = decrease_max_block_range(
-                                            // Decrease block range on error
-                                            current_block_range_limitation,
-                                            min_block_range_limitation,
+                                            "Failed to send logs to stream consumer!"
                                         );
                                         drop(permit);
-                                        sleep(error_retry_delay).await; // Introduce delay before retry
-                                        error_retry_delay =
-                                            (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
-                                        continue; // continue to next iteration with same
-                                                  // block range
+                                        break;
                                     }
+
+                                    current_block_range_limitation = increase_max_block_range(
+                                        // Increase block range on success
+                                        current_block_range_limitation,
+                                        min_block_range_limitation,
+                                    );
+
+                                    if logs_empty {
+                                        current_filter =
+                                            current_filter.set_from_block(to_block + 1);
+                                        info!(
+                                            log_name = %info_log_name,
+                                            indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                            from_block = %from_block,
+                                            to_block = %to_block,
+                                            "No events found between blocks in live indexing"
+                                        );
+                                    } else if let Some(last_log) = last_log {
+                                        if let Some(last_log_block_number) =
+                                            last_log.inner.block_number
+                                        {
+                                            current_filter = current_filter.set_from_block(
+                                                last_log_block_number + U64::from(1),
+                                            );
+                                        } else {
+                                            error!("Failed to get last log block number the provider returned null (should never happen) - try again in 200ms");
+                                        }
+                                    }
+
+                                    drop(permit);
+                                }
+                                Err(err) => {
+                                    error!(
+                                        log_name = %info_log_name,
+                                        indexing_status = %IndexingEventProgressStatus::Live.log(),
+                                        error = %err,
+                                        from_block = %from_block,
+                                        to_block = %to_block,
+                                        current_block_range_limitation = ?current_block_range_limitation,
+                                        "Error fetching logs for live indexing"
+                                    );
+                                    current_block_range_limitation = decrease_max_block_range(
+                                        // Decrease block range on error
+                                        current_block_range_limitation,
+                                        min_block_range_limitation,
+                                    );
+                                    drop(permit);
                                 }
                             }
-                        } else {
-                            warn!("WARNING - empty latest block returned from provider, will try again in after delay");
-                            sleep(error_retry_delay).await; // Introduce delay before retry
-                            error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
                         }
                     } else {
-                        warn!("WARNING - empty latest block returned from provider, will try again in after delay");
-                        sleep(error_retry_delay).await; // Introduce delay before retry
-                        error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
+                        info!("WARNING - empty latest block returned from provider, will try again in 200ms");
                     }
+                } else {
+                    info!("WARNING - empty latest block returned from provider, will try again in 200ms");
                 }
-                Err(error) => {
-                    error!(
-                        error = %error,
-                        "Failed to get latest block, will try again in after delay"
-                    );
-                    sleep(error_retry_delay).await; // Introduce delay before retry
-                    error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential
-                                                                                      // backoff
-                }
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Error getting latest block, will try again in 1 seconds"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         }
     }

@@ -125,13 +125,7 @@ pub async fn start_indexing(
 
             if let Some(start_block) = network_contract.start_block {
                 if start_block > latest_block {
-                    error!(
-                        info_log = %event.info_log_name(),
-                        network = %network_contract.network,
-                        start_block_yaml = %start_block,
-                        latest_block = %latest_block,
-                        "start_block supplied in yaml is higher then latest block number"
-                    );
+                    error!("{} - start_block supplied in yaml - {} {} is higher then latest block number - {}", event.info_log_name(), network_contract.network, start_block, latest_block);
                     return Err(StartIndexingError::StartBlockIsHigherThanLatestBlockError(
                         event.info_log_name().to_string(),
                         start_block,
@@ -142,13 +136,7 @@ pub async fn start_indexing(
 
             if let Some(end_block) = network_contract.end_block {
                 if end_block > latest_block {
-                    error!(
-                        info_log = %event.info_log_name(),
-                        network = %network_contract.network,
-                        end_block_yaml = %end_block,
-                        latest_block = %latest_block,
-                        "end_block supplied in yaml is higher then latest block number"
-                    );
+                    error!("{} - end_block supplied in yaml - {} {} is higher then latest block number - {}", event.info_log_name(), network_contract.network, end_block, latest_block);
                     return Err(StartIndexingError::EndBlockIsHigherThanLatestBlockError(
                         event.info_log_name().to_string(),
                         end_block,
@@ -163,10 +151,10 @@ pub async fn start_indexing(
                 if let Some(value) = last_synced_block {
                     let start_from = value + 1;
                     info!(
-                        info_log = %event.info_log_name(),
-                        last_synced_block = ?value,
-                        start_from = ?start_from,
-                        "Found last synced block number - rindexer will start up from"
+                        "{} Found last synced block number - {:?} rindexer will start up from {:?}",
+                        event.info_log_name(),
+                        value,
+                        start_from
                     );
                     Some(start_from)
                 } else {
@@ -178,22 +166,12 @@ pub async fn start_indexing(
 
             let start_block = last_known_start_block
                 .unwrap_or(network_contract.start_block.unwrap_or(latest_block));
-            info!(
-                info_log = %event.info_log_name(),
-                start_block = %start_block,
-                "start_block is"
-            );
+            info!("{} start_block is {}", event.info_log_name(), start_block);
             let end_block =
                 std::cmp::min(network_contract.end_block.unwrap_or(latest_block), latest_block);
             if let Some(end_block) = network_contract.end_block {
                 if end_block > latest_block {
-                    error!(
-                        info_log = %event.info_log_name(),
-                        end_block_yaml = %end_block,
-                        latest_block = %latest_block,
-                        end_block_corrected = %latest_block,
-                        "end_block supplied in yaml is higher then latest - end_block now will be"
-                    );
+                    error!("{} - end_block supplied in yaml - {} is higher then latest - {} - end_block now will be {}", event.info_log_name(), end_block, latest_block, latest_block);
                 }
             }
 
@@ -318,7 +296,7 @@ pub async fn start_indexing(
 
     let duration = start.elapsed();
 
-    info!(duration = ?duration, "Historical indexing complete - time taken");
+    info!("Historical indexing complete - time taken: {:?}", duration);
 
     Ok(processed_network_contracts)
 }
@@ -330,7 +308,7 @@ async fn initialize_database(
         match PostgresClient::new().await {
             Ok(postgres) => Ok(Some(Arc::new(postgres))),
             Err(e) => {
-                error!(error = %e, "Error connecting to Postgres");
+                error!("Error connecting to Postgres: {:?}", e);
                 Err(StartIndexingError::PostgresConnectionError(e))
             }
         }

@@ -134,9 +134,8 @@ impl IndexingEventsProgressState {
                     }
                     Err(e) => {
                         error!(
-                            network = %network_contract.network,
-                            error = %e,
-                            "Failed to get latest block"
+                            "Failed to get latest block for network {}: {}",
+                            network_contract.network, e
                         );
                     }
                 }
@@ -192,10 +191,10 @@ impl IndexingEventsProgressState {
                     if new_last_synced_block >= event.syncing_to_block {
                         event.progress = 1.0;
                         info!(
-                            info_log = %event.info_log,
-                            network = %event.network,
-                            progress = event.progress,
-                            "Indexing progress update - Completed"
+                            "{} - network {} - {:.2}% progress",
+                            event.info_log,
+                            event.network,
+                            event.progress * 100.0
                         );
                         event.status = if event.live_indexing {
                             IndexingEventProgressStatus::Live
@@ -206,10 +205,10 @@ impl IndexingEventsProgressState {
 
                     if event.progress != 1.0 {
                         info!(
-                            info_log = %event.info_log,
-                            network = %event.network,
-                            progress = event.progress,
-                            "Indexing progress update"
+                            "{} - network {} - {:.2}% progress",
+                            event.info_log,
+                            event.network,
+                            event.progress * 100.0
                         );
                     }
                 }
