@@ -99,7 +99,13 @@ pub async fn get_last_synced_block_number(config: SyncConfig<'_>) -> Option<U64>
 
                 result
             } else {
-                error!("Error fetching last synced block from CSV");
+                error!(
+                    path = %csv_details.path,
+                    contract_name = %config.contract_name,
+                    event_name = %config.event_name,
+                    network = %config.network,
+                    "Error fetching last synced block from CSV"
+                );
                 None
             }
         }
@@ -135,7 +141,13 @@ pub async fn get_last_synced_block_number(config: SyncConfig<'_>) -> Option<U64>
 
             result
         } else {
-            error!("Error fetching last synced block from stream");
+            error!(
+                stream_path = %stream_details.get_streams_last_synced_block_path(),
+                contract_name = %config.contract_name,
+                event_name = %config.event_name,
+                network = %config.network,
+                "Error fetching last synced block from stream"
+            );
             None
         }
     }
@@ -161,7 +173,14 @@ pub async fn get_last_synced_block_number(config: SyncConfig<'_>) -> Option<U64>
                 }
             }
             Err(e) => {
-                error!("Error fetching last synced block: {:?}", e);
+                error!(
+                    error = %e,
+                    indexer_name = %config.indexer_name,
+                    contract_name = %config.contract_name,
+                    event_name = %config.event_name,
+                    network = %config.network,
+                    "Error fetching last synced block from database"
+                );
                 None
             }
         }
@@ -228,7 +247,7 @@ pub fn update_progress_and_last_synced_task(
             .update_last_synced_block(&config.network_contract.id, to_block);
 
         if let Err(e) = update_last_synced_block_result {
-            error!("Error updating last synced block: {:?}", e);
+            error!(error = %e, "Error updating last synced block progress state");
         }
 
         if let Some(database) = &config.database {
@@ -248,7 +267,14 @@ pub fn update_progress_and_last_synced_task(
                 .await;
 
             if let Err(e) = result {
-                error!("Error updating last synced block: {:?}", e);
+                error!(
+                    error = %e,
+                    indexer_name = %config.indexer_name,
+                    contract_name = %config.contract_name,
+                    event_name = %config.event_name,
+                    network = %config.network_contract.network,
+                    "Error updating last synced block to database"
+                );
             }
         } else if let Some(csv_details) = &config.csv_details {
             if let Err(e) = update_last_synced_block_number_for_file(
@@ -261,8 +287,12 @@ pub fn update_progress_and_last_synced_task(
             .await
             {
                 error!(
-                    "Error updating last synced block to CSV - path - {} error - {:?}",
-                    csv_details.path, e
+                    error = %e,
+                    path = %csv_details.path,
+                    contract_name = %config.contract_name,
+                    event_name = %config.event_name,
+                    network = %config.network_contract.network,
+                    "Error updating last synced block to CSV"
                 );
             }
         } else if let Some(stream_last_synced_block_file_path) =
@@ -280,8 +310,12 @@ pub fn update_progress_and_last_synced_task(
             .await
             {
                 error!(
-                    "Error updating last synced block to stream - path - {} error - {:?}",
-                    stream_last_synced_block_file_path, e
+                    error = %e,
+                    stream_path = %stream_last_synced_block_file_path,
+                    contract_name = %config.contract_name,
+                    event_name = %config.event_name,
+                    network = %config.network_contract.network,
+                    "Error updating last synced block to stream"
                 );
             }
         }
