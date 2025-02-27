@@ -406,7 +406,7 @@ pub async fn live_indexing_stream(
                             let from_block = state.filter.get_from_block();
 
                             if from_block > safe_block_number {
-                                info!(
+                                debug!(
                                     event_name = %config.event_name,
                                     contract_name = %config.contract_name,
                                     indexing_status = %IndexingEventProgressStatus::Live.log(),
