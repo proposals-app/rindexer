@@ -9,9 +9,9 @@ use futures::future::join_all;
 use tokio::{
     sync::{Mutex, MutexGuard},
     task::{JoinError, JoinHandle},
-    time::Instant,
+    time::{sleep, Instant},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     event::{
@@ -258,6 +258,8 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
 
     // this is used for less busy chains to make sure they know rindexer is still alive
     let log_no_new_block_interval = Duration::from_secs(300);
+    let mut error_retry_delay = Duration::from_millis(200); // Initial retry delay
+    let max_retry_delay = Duration::from_secs(60); // Maximum retry delay
 
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -404,13 +406,15 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                             let permit = semaphore_client.acquire_owned().await;
 
                             if let Ok(permit) = permit {
-                                match config
+                                let get_logs_result = config
                                     .network_contract
                                     .cached_provider
                                     .get_logs(&ordering_live_indexing_details.filter)
-                                    .await
-                                {
+                                    .await;
+
+                                match get_logs_result {
                                     Ok(logs) => {
+                                        error_retry_delay = Duration::from_millis(200); // reset delay on success
                                         debug!(
                                             event_name = %config.event_name,
                                             contract_name = %config.contract_name,
@@ -452,10 +456,14 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                         contract_name = %config.contract_name,
                                                         indexing_status = %IndexingEventProgressStatus::Live.log(),
                                                         error = %e,
-                                                        "Error indexing task - will try again in 200ms"
+                                                        "Error indexing task - will try again in after delay"
                                                     );
                                                     drop(permit);
-                                                    break;
+                                                    sleep(error_retry_delay).await; // Introduce delay before retry
+                                                    error_retry_delay = (error_retry_delay * 2)
+                                                        .min(max_retry_delay); // Exponential backoff
+                                                    continue; // continue to next iteration with
+                                                              // same block range
                                                 }
                                                 ordering_live_indexing_details
                                                     .last_seen_block_number = to_block;
@@ -483,7 +491,13 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                                     last_log_block_number + 1,
                                                                 );
                                                     } else {
-                                                        error!("Failed to get last log block number the provider returned null (should never happen) - try again in 200ms");
+                                                        error!("Failed to get last log block number the provider returned null (should never happen) - try again in after delay");
+                                                        drop(permit);
+                                                        sleep(error_retry_delay).await; // Introduce delay before retry
+                                                        error_retry_delay = (error_retry_delay * 2)
+                                                            .min(max_retry_delay); // Exponential backoff
+                                                        continue; // continue to next iteration with
+                                                                  // same block range
                                                     }
                                                 }
 
@@ -501,10 +515,14 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                                     contract_name = %config.contract_name,
                                                     indexing_status = %IndexingEventProgressStatus::Live.log(),
                                                     error = %err,
-                                                    "Error fetching logs - will try again in 200ms"
+                                                    "Error fetching logs - will try again in after delay"
                                                 );
                                                 drop(permit);
-                                                break;
+                                                sleep(error_retry_delay).await; // Introduce delay before retry
+                                                error_retry_delay =
+                                                    (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
+                                                continue; // continue to next iteration with same
+                                                          // block range
                                             }
                                         }
                                     }
@@ -514,25 +532,36 @@ async fn live_indexing_for_contract_event_dependencies<'a>(
                                             contract_name = %config.contract_name,
                                             indexing_status = %IndexingEventProgressStatus::Live.log(),
                                             error = %err,
-                                            "Error fetching logs - will try again in 200ms"
+                                            "Error fetching logs - will try again in after delay"
                                         );
                                         drop(permit);
-                                        break;
+                                        sleep(error_retry_delay).await; // Introduce delay before retry
+                                        error_retry_delay =
+                                            (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
+                                        continue; // continue to next iteration with same block
+                                                  // range
                                     }
                                 }
                             }
                         } else {
-                            info!("WARNING - empty latest block returned from provider, will try again in 200ms");
+                            warn!("WARNING - empty latest block returned from provider, will try again in after delay");
+                            sleep(error_retry_delay).await; // Introduce delay before retry
+                            error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
                         }
                     } else {
-                        info!("WARNING - empty latest block returned from provider, will try again in 200ms");
+                        warn!("WARNING - empty latest block returned from provider, will try again in after delay");
+                        sleep(error_retry_delay).await; // Introduce delay before retry
+                        error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential backoff
                     }
                 }
                 Err(error) => {
                     error!(
                         error = %error,
-                        "Failed to get latest block, will try again in 200ms"
+                        "Failed to get latest block, will try again in after delay"
                     );
+                    sleep(error_retry_delay).await; // Introduce delay before retry
+                    error_retry_delay = (error_retry_delay * 2).min(max_retry_delay); // Exponential
+                                                                                      // backoff
                 }
             }
         }
